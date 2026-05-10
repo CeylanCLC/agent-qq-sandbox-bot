@@ -867,8 +867,8 @@ journalctl -u qq-openclaw-bridge -n 300 --no-pager --full | grep -E "Task except
 ---
 
 ## 15. 安全注意事项
-
-不要提交以下内容到 GitHub：
+如果要将部署后的该agent上传到公开平台
+请注意不要提交以下内容：
 
 ```text
 QQ 登录态
@@ -919,29 +919,10 @@ git grep --cached -n -E "QQ号|群号|公网IP|sk-|tp-|token|auth" || true
 
 ## 16. Demo Screenshots
 
-如果你上传了截图，可以放在：
+实际运行截图放在：
 
 ```text
 docs/images/
-```
-
-然后在 README 中引用：
-
-```markdown
-![Periodic group review logs](docs/images/demo-periodic-log.png)
-![Bot profile history](docs/images/demo-profile-history.png)
-![Hardware context reply 1](docs/images/demo-hardware-context-1.png)
-![Hardware context reply 2](docs/images/demo-hardware-context-2.png)
-![Memory context](docs/images/demo-memory-context.png)
-![Active reply](docs/images/demo-active-reply.png)
-```
-
-如果你使用 `screenshots/` 目录，则路径改成：
-
-```markdown
-![Periodic group review logs](screenshots/demo-periodic-log.png)
-```
-
 ---
 
 ## 17. 适合学习的知识点
