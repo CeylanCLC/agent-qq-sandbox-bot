@@ -78,15 +78,24 @@ Do not commit:
 
 ## Demo Screenshots
 
-![Periodic group review logs](screenshots/demo-periodic-log.png)
+### Periodic group review logs
 
-![Bot profile history](screenshots/demo-profile-history.png)
+![Periodic group review logs](demo-pic-lo.png)
 
-![Hardware context reply 1](screenshots/demo-hardware-context-1.png)
+### Bot profile and historical replies
 
-![Hardware context reply 2](screenshots/demo-hardware-context-2.png)
+![Bot profile history](demo-profile-history.png)
 
-![Memory context](screenshots/demo-memory-context.png)
+### Hardware group context reply
 
-![Active reply](screenshots/demo-active-reply.png)
-![Active reply](docs/images/demo-active-reply.png)
+![Hardware context reply 1](demo-hardware-context-1.png)
+
+![Hardware context reply 2](demo-hardware-context-2.png)
+
+### Memory-aware reply
+
+![Memory context](demo-memory-context.png)
+
+### Active reply with group context
+
+![Active reply](demo-active-rply.png)
