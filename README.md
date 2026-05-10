@@ -75,3 +75,27 @@ Do not commit:
 - docker-compose.yml
 - venv/
 - files under share/
+
+## Demo Screenshots
+
+### Periodic group review logs
+
+![Periodic group review logs](docs/images/demo-periodic-log.png)
+
+### Bot profile and historical replies
+
+![Bot profile history](docs/images/demo-profile-history.png)
+
+### Hardware group context reply
+
+![Hardware context reply 1](docs/images/demo-hardware-context-1.png)
+
+![Hardware context reply 2](docs/images/demo-hardware-context-2.png)
+
+### Memory-aware reply
+
+![Memory context](docs/images/demo-memory-context.png)
+
+### Active reply with group context
+
+![Active reply](docs/images/demo-active-reply.png)
