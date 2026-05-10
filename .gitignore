@@ -1,0 +1,38 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+bridge.log
+
+# Secrets / env
+.env
+.env.*
+*.token
+*.key
+
+# Runtime cache
+periodic_state.json
+
+# NapCat / QQ login state / sensitive runtime files
+napcat/
+ntqq/
+docker-compose.yml
+
+# Shared files sent to QQ groups
+share/*
+!share/.gitkeep
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Backups / accidental files
+*.bak
+*.bak.*
+docker-compose.yml.bak.*
+127.0.0.1:*
+=
