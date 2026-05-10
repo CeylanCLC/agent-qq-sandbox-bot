@@ -923,6 +923,7 @@ git grep --cached -n -E "QQ号|群号|公网IP|sk-|tp-|token|auth" || true
 
 ```text
 docs/images/
+```
 ---
 
 ## 17. 适合学习的知识点
