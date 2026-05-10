@@ -80,22 +80,22 @@ Do not commit:
 
 ### Periodic group review logs
 
-![Periodic group review logs](demo-pic-lo.png)
+![Periodic group review logs](docs/images/demo-periodic-log.png)
 
 ### Bot profile and historical replies
 
-![Bot profile history](demo-profile-history.png)
+![Bot profile history](docs/images/demo-profile-history.png)
 
 ### Hardware group context reply
 
-![Hardware context reply 1](demo-hardware-context-1.png)
+![Hardware context reply 1](docs/images/demo-hardware-context-1.png)
 
-![Hardware context reply 2](demo-hardware-context-2.png)
+![Hardware context reply 2](docs/images/demo-hardware-context-2.png)
 
 ### Memory-aware reply
 
-![Memory context](demo-memory-context.png)
+![Memory context](docs/images/demo-memory-context.png)
 
 ### Active reply with group context
 
-![Active reply](demo-active-rply.png)
+![Active reply](docs/images/demo-active-reply.png)
