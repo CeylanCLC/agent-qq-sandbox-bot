@@ -1,10 +1,12 @@
 import asyncio
+import base64
 import hashlib
 import json
 import os
 import re
 import time
 import uuid
+from urllib.parse import unquote
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -17,6 +19,25 @@ OPENCLAW_URL = "http://127.0.0.1:29306/v1/chat/completions"
 
 HOST_SHARE_DIR = "/root/openclaw-qq/share"
 CONTAINER_SHARE_DIR = "/share"
+
+# 图片理解配置
+# url：直接把 NapCat 给的图片 URL 传给模型；省流量，但要求模型服务能访问该 URL
+# data_url：服务器先下载图片，再转 base64 data URL 传给模型；更稳，但更耗带宽和 token
+IMAGE_SEND_MODE = os.getenv("IMAGE_SEND_MODE", "url").strip().lower()
+
+# 单次用户消息最多带几张图片给模型
+MAX_IMAGES_PER_MESSAGE = int(os.getenv("MAX_IMAGES_PER_MESSAGE", "3"))
+
+# 用户说“上图/这图/图片”时，最多从群聊缓存里补几张最近图片
+MAX_CONTEXT_IMAGES = int(os.getenv("MAX_CONTEXT_IMAGES", "2"))
+
+# data_url 模式下，单张图片最大下载字节数，默认 4MB
+MAX_IMAGE_DOWNLOAD_BYTES = int(os.getenv("MAX_IMAGE_DOWNLOAD_BYTES", str(4 * 1024 * 1024)))
+# 群里文字先到、图片后到时，问图消息最多等几秒再找图
+IMAGE_WAIT_AFTER_TEXT_SECONDS = float(os.getenv("IMAGE_WAIT_AFTER_TEXT_SECONDS", "2.0"))
+# 补图时只取最近多少秒内的图片，避免拿很久以前的图乱答
+RECENT_IMAGE_MAX_AGE_SECONDS = float(os.getenv("RECENT_IMAGE_MAX_AGE_SECONDS", "180"))
+VISION_IMAGE_URL_FORMAT = os.getenv("VISION_IMAGE_URL_FORMAT", "object").strip().lower()
 
 # 只有这些 QQ 号可以触发“任务模式”
 # 改成你自己的 QQ 号；多个管理员就写多个。
@@ -37,7 +58,7 @@ MAX_TASK_STEPS = 6
 MAX_HISTORY = 30
 
 # 主动触发时，额外给 OpenClaw 看的最近群消息条数
-ACTIVE_GROUP_CONTEXT_LIMIT = 40
+ACTIVE_GROUP_CONTEXT_LIMIT = int(os.getenv("ACTIVE_GROUP_CONTEXT_LIMIT", "25"))
 
 # 每隔多久巡群一次：3小时
 PERIODIC_REVIEW_INTERVAL_SECONDS = 60
@@ -56,13 +77,38 @@ MAX_GROUPS_PER_REVIEW = 20
 # 巡群状态落盘文件：保存缓存、last_seq、已发过的巡群回复，防止重启后失忆
 PERIODIC_STATE_FILE = Path("/root/openclaw-qq/periodic_state.json")
 
+# 群长期压缩记忆文件：不保存全部历史原文，只保存每个群的长期摘要
+GROUP_MEMORY_STATE_FILE = Path("/root/openclaw-qq/group_memory_state.json")
+
+# 每隔多久尝试压缩一次群记忆，默认 5 小时
+GROUP_MEMORY_COMPACT_INTERVAL_SECONDS = int(os.getenv("GROUP_MEMORY_COMPACT_INTERVAL_SECONDS", str(5 * 60 * 60)))
+
+# 每个群新增多少条消息后才值得压缩，避免频繁消耗 token
+GROUP_MEMORY_MIN_NEW_MESSAGES = int(os.getenv("GROUP_MEMORY_MIN_NEW_MESSAGES", "80"))
+
+# 单次压缩最多取多少条新消息
+GROUP_MEMORY_RAW_LIMIT = int(os.getenv("GROUP_MEMORY_RAW_LIMIT", "140"))
+
+# 长期摘要最大字符数，越小越省输入 token
+GROUP_MEMORY_MAX_CHARS = int(os.getenv("GROUP_MEMORY_MAX_CHARS", "1800"))
+
+# 普通回复时最多塞入多少字符长期摘要
+GROUP_MEMORY_CONTEXT_MAX_CHARS = int(os.getenv("GROUP_MEMORY_CONTEXT_MAX_CHARS", "1200"))
+
 
 histories = defaultdict(lambda: deque(maxlen=MAX_HISTORY))
+# 私聊最近图片缓存：用于用户先发图、后发“看图/这图是什么”时自动补图
+private_image_cache = defaultdict(lambda: deque(maxlen=10))
 group_message_cache = defaultdict(lambda: deque(maxlen=GROUP_CACHE_MAX_MESSAGES))
+# 群聊最近图片缓存：用于群友先发图、后 @ 机器人问“这图是什么”时补图
+group_image_cache = defaultdict(lambda: deque(maxlen=50))
 
 group_message_seq = defaultdict(int)
 group_last_periodic_seq = defaultdict(int)
 periodic_answer_fingerprints = defaultdict(lambda: deque(maxlen=50))
+group_memory_summary = defaultdict(str)
+group_memory_last_seq = defaultdict(int)
+group_memory_last_update_ts = defaultdict(float)
 running_tasks = set()
 send_lock = asyncio.Lock()
 
@@ -176,6 +222,219 @@ def record_bot_group_message(group_id, text):
     save_periodic_state()
 
 
+
+def save_group_memory_state():
+    try:
+        state = {
+            "group_memory_summary": dict(group_memory_summary),
+            "group_memory_last_seq": {
+                gid: int(seq)
+                for gid, seq in group_memory_last_seq.items()
+            },
+            "group_memory_last_update_ts": {
+                gid: float(ts)
+                for gid, ts in group_memory_last_update_ts.items()
+            },
+        }
+
+        tmp = GROUP_MEMORY_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(GROUP_MEMORY_STATE_FILE)
+
+    except Exception as e:
+        print(f"[群长期记忆保存失败] {e}", flush=True)
+
+
+def load_group_memory_state():
+    global group_memory_summary
+    global group_memory_last_seq
+    global group_memory_last_update_ts
+
+    if not GROUP_MEMORY_STATE_FILE.exists():
+        return
+
+    try:
+        state = json.loads(GROUP_MEMORY_STATE_FILE.read_text(encoding="utf-8"))
+
+        group_memory_summary = defaultdict(str)
+        for gid, text in state.get("group_memory_summary", {}).items():
+            group_memory_summary[str(gid)] = str(text)
+
+        group_memory_last_seq = defaultdict(int)
+        for gid, seq in state.get("group_memory_last_seq", {}).items():
+            group_memory_last_seq[str(gid)] = int(seq)
+
+        group_memory_last_update_ts = defaultdict(float)
+        for gid, ts in state.get("group_memory_last_update_ts", {}).items():
+            group_memory_last_update_ts[str(gid)] = float(ts)
+
+        print(
+            f"[群长期记忆已加载] groups={len(group_memory_summary)}",
+            flush=True
+        )
+
+    except Exception as e:
+        print(f"[群长期记忆加载失败] {e}", flush=True)
+
+
+def format_messages_for_memory(group_id, since_seq=0, limit=140):
+    group_id = str(group_id)
+    msgs = list(group_message_cache.get(group_id, []))
+
+    if since_seq:
+        msgs = [m for m in msgs if int(m.get("seq", 0)) > int(since_seq)]
+
+    msgs = msgs[-limit:]
+
+    lines = []
+    max_seq = int(since_seq or 0)
+
+    for m in msgs:
+        seq = int(m.get("seq", 0))
+        max_seq = max(max_seq, seq)
+
+        is_bot = bool(m.get("is_bot", False))
+        name = "弹性" if is_bot else (m.get("nickname") or m.get("user_id") or "群友")
+        text = str(m.get("text") or "").strip()
+        ts = str(m.get("time") or "")
+
+        img_count = len(list(m.get("image_urls") or []))
+        img_note = f" [图片数={img_count}]" if img_count else ""
+
+        if text:
+            lines.append(f"seq={seq} [{ts}] {name}: {text}{img_note}")
+
+    return "\n".join(lines), max_seq, len(msgs)
+
+
+def build_group_memory_context(group_id):
+    group_id = str(group_id)
+    text = (group_memory_summary.get(group_id) or "").strip()
+
+    if not text:
+        return ""
+
+    if len(text) > GROUP_MEMORY_CONTEXT_MAX_CHARS:
+        text = text[-GROUP_MEMORY_CONTEXT_MAX_CHARS:]
+
+    return text
+
+
+async def compact_group_memory_once(group_id, force=False):
+    group_id = str(group_id)
+
+    last_seq = int(group_memory_last_seq.get(group_id, 0))
+    old_summary = (group_memory_summary.get(group_id) or "").strip()
+
+    raw_text, max_seq, new_count = format_messages_for_memory(
+        group_id,
+        since_seq=last_seq,
+        limit=GROUP_MEMORY_RAW_LIMIT
+    )
+
+    if not raw_text.strip() or new_count == 0:
+        return False
+
+    if not force and new_count < GROUP_MEMORY_MIN_NEW_MESSAGES:
+        print(
+            f"[群长期记忆] group={group_id} new_count={new_count}, skip",
+            flush=True
+        )
+        return False
+
+    prompt = f"""
+你是QQ群机器人“弹性”的长期记忆压缩器。
+
+请把旧长期摘要和新增聊天记录合并成一份新的“群长期记忆摘要”。
+
+要求：
+1. 只保留长期有用的信息，不要逐字复述聊天。
+2. 保留群里反复出现的人名/昵称、他们的偏好、项目、课程、作业、梗、争论点、机器人已经说过的重要话。
+3. 如果出现图片，只能根据聊天文本中的描述概括，不要凭空描述图片内容。
+4. 删除无意义寒暄、刷屏、重复表情、临时情绪。
+5. 不要编造没有出现过的信息。
+6. 输出中文，尽量结构化，控制在 {GROUP_MEMORY_MAX_CHARS} 字以内。
+7. 不要提 OpenClaw、token、接口、后台、工作区、压缩器等内部实现。
+8. 这份摘要以后会作为群聊上下文给机器人参考，所以要利于避免重复说话。
+
+旧长期摘要：
+{old_summary if old_summary else "暂无"}
+
+新增聊天记录：
+{raw_text}
+
+请输出新的群长期记忆摘要：
+"""
+
+    messages = [
+        {
+            "role": "system",
+            "content": "你是严谨的群聊长期记忆压缩器，只输出摘要，不输出解释。"
+        },
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ]
+
+    try:
+        summary = await call_openclaw(messages, max_tokens=1000, timeout=600)
+    except Exception as e:
+        print(f"[群长期记忆压缩失败] group={group_id} error={e}", flush=True)
+        return False
+
+    summary = (summary or "").strip()
+
+    if not summary:
+        print(f"[群长期记忆压缩失败] group={group_id} empty-summary", flush=True)
+        return False
+
+    # 防止模型废话太长
+    if len(summary) > GROUP_MEMORY_MAX_CHARS:
+        summary = summary[:GROUP_MEMORY_MAX_CHARS] + "……"
+
+    group_memory_summary[group_id] = summary
+    group_memory_last_seq[group_id] = max_seq
+    group_memory_last_update_ts[group_id] = time.time()
+
+    save_group_memory_state()
+
+    print(
+        f"[群长期记忆已更新] group={group_id} new_count={new_count} "
+        f"last_seq={max_seq} summary_len={len(summary)}",
+        flush=True
+    )
+
+    return True
+
+
+async def periodic_group_memory_compaction():
+    await asyncio.sleep(120)
+
+    while True:
+        try:
+            await asyncio.sleep(GROUP_MEMORY_COMPACT_INTERVAL_SECONDS)
+
+            group_ids = list(group_message_cache.keys())
+
+            if PERIODIC_REVIEW_GROUPS:
+                group_ids = [gid for gid in group_ids if gid in PERIODIC_REVIEW_GROUPS]
+
+            group_ids = group_ids[:MAX_GROUPS_PER_REVIEW]
+
+            for group_id in group_ids:
+                await compact_group_memory_once(group_id, force=False)
+                await asyncio.sleep(2)
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception as e:
+            print(f"[群长期记忆主循环错误] {e}，60秒后继续", flush=True)
+            await asyncio.sleep(60)
+
+
+
 def load_bootstrap_prompt():
     try:
         text = Path("/root/.openclaw/workspace/BOOTSTRAP.md").read_text(encoding="utf-8").strip()
@@ -253,6 +512,13 @@ def get_openclaw_token():
 
 OPENCLAW_TOKEN = get_openclaw_token()
 
+# 带图消息可绕过 OpenClaw，直接调用小米 MiMo OpenAI-compatible API
+# 纯文本仍然走 OpenClaw
+USE_DIRECT_MIMO_VISION = os.getenv("USE_DIRECT_MIMO_VISION", "1").strip() == "1"
+MIMO_VISION_BASE_URL = os.getenv("MIMO_VISION_BASE_URL", "").strip().rstrip("/")
+MIMO_VISION_API_KEY = os.getenv("MIMO_VISION_API_KEY", "").strip()
+MIMO_VISION_MODEL = os.getenv("MIMO_VISION_MODEL", "mimo-v2.5").strip()
+
 
 
 def is_ignored_sender(event):
@@ -278,6 +544,43 @@ def is_ignored_sender(event):
     return False
 
 
+def extract_image_url_from_segment(data):
+    """
+    从 NapCat / OneBot image segment 中提取可给视觉模型使用的图片地址。
+    优先使用 url；其次尝试 file/path。
+    """
+    if not isinstance(data, dict):
+        return ""
+
+    candidates = [
+        data.get("url"),
+        data.get("file"),
+        data.get("path"),
+    ]
+
+    for value in candidates:
+        if not value:
+            continue
+
+        value = unquote(str(value).strip())
+
+        if value.startswith("http://") or value.startswith("https://"):
+            return value
+
+        if value.startswith("data:image/"):
+            return value
+
+    # 调试用：不打印完整 URL，避免日志泄露太多信息
+    short = {}
+    for k, v in data.items():
+        sv = str(v)
+        short[k] = sv[:80] + ("..." if len(sv) > 80 else "")
+
+    print(f"[图片段无可用URL] keys={list(data.keys())} data={short}", flush=True)
+
+    return ""
+
+
 def parse_message(event):
     self_id = str(event.get("self_id", ""))
     msg = event.get("message", [])
@@ -285,12 +588,24 @@ def parse_message(event):
 
     at_me = False
     texts = []
+    image_urls = []
 
     if isinstance(msg, str):
         at_code = f"[CQ:at,qq={self_id}]"
         at_me = at_code in msg or at_code in raw
+
+        # 兼容 CQ 码格式里的图片 URL
+        for m in re.finditer(r"\\[CQ:image,[^\\]]*url=([^,\\]]+)", msg):
+            url = m.group(1).strip()
+            if url:
+                image_urls.append(url)
+
         text = raw.replace(at_code, "").strip()
-        return at_me, text
+
+        if image_urls and "[图片]" not in text:
+            text = (text + " [图片]").strip()
+
+        return at_me, text, image_urls
 
     for seg in msg:
         typ = seg.get("type")
@@ -303,13 +618,17 @@ def parse_message(event):
             texts.append(data.get("text", ""))
 
         if typ == "image":
+            url = extract_image_url_from_segment(data)
+            if url:
+                image_urls.append(url)
             texts.append("[图片]")
 
         if typ == "face":
             texts.append("[表情]")
 
     text = "".join(texts).strip()
-    return at_me, text
+    return at_me, text, image_urls
+
 
 
 def should_reply(at_me, text):
@@ -348,7 +667,7 @@ def parse_send_asset_command(text):
     return "", ""
 
 
-def record_group_message(event, text):
+def record_group_message(event, text, image_urls=None):
     group_id = str(event.get("group_id", ""))
     user_id = str(event.get("user_id", ""))
     self_id = str(event.get("self_id", ""))
@@ -356,7 +675,11 @@ def record_group_message(event, text):
     if not group_id or not user_id or user_id == self_id:
         return
 
+    image_urls = list(image_urls or [])
+
     text = text.strip()
+    if not text and image_urls:
+        text = "[图片]"
     if not text:
         return
 
@@ -378,14 +701,16 @@ def record_group_message(event, text):
         "user_id": user_id,
         "nickname": nickname,
         "text": text,
+        "image_urls": image_urls[:MAX_IMAGES_PER_MESSAGE],
         "is_bot": False,
     })
 
     print(
         f"[缓存群消息] group={group_id} seq={group_message_seq[group_id]} "
-        f"user={user_id} nickname={nickname} text={text}",
+        f"user={user_id} nickname={nickname} text={text} images={len(image_urls)}",
         flush=True
     )
+
 
 
 def build_group_recent_text(group_id, limit=80, only_new=False):
@@ -401,6 +726,7 @@ def build_group_recent_text(group_id, limit=80, only_new=False):
     lines = []
     max_seq = group_last_periodic_seq.get(group_id, 0)
     human_new_count = 0
+    image_urls = []
 
     for m in msgs:
         seq = int(m.get("seq", 0))
@@ -413,9 +739,17 @@ def build_group_recent_text(group_id, limit=80, only_new=False):
         name = "弹性" if is_bot else (m.get("nickname") or m.get("user_id"))
         text = m.get("text", "")
         ts = m.get("time", "")
-        lines.append(f"[{ts}] {name}: {text}")
 
-    return "\\n".join(lines), max_seq, len(msgs), human_new_count
+        msg_images = list(m.get("image_urls") or [])
+        image_note = f" 图片数={len(msg_images)}" if msg_images else ""
+
+        lines.append(f"[{ts}] {name}: {text}{image_note}")
+
+        for url in msg_images:
+            if url:
+                image_urls.append(url)
+
+    return "\n".join(lines), max_seq, len(msgs), human_new_count, image_urls
 
 
 def build_group_context_text(group_id, limit=40):
@@ -429,9 +763,91 @@ def build_group_context_text(group_id, limit=40):
         name = "弹性" if is_bot else (m.get("nickname") or m.get("user_id"))
         text = m.get("text", "")
         ts = m.get("time", "")
-        lines.append(f"[{ts}] {name}: {text}")
 
-    return "\\n".join(lines)
+        msg_images = list(m.get("image_urls") or [])
+        image_note = f" 图片数={len(msg_images)}" if msg_images else ""
+
+        lines.append(f"[{ts}] {name}: {text}{image_note}")
+
+    return "\n".join(lines)
+
+
+def get_recent_group_image_urls(group_id, user_id=None, limit_msgs=30, max_images=2, max_age_seconds=None):
+    """
+    获取某个群最近图片 URL。
+    优先级：
+    1. 同一用户最近图片；
+    2. 本群最近图片；
+    3. group_message_cache 兜底。
+    """
+    group_id = str(group_id)
+    user_id = str(user_id) if user_id is not None else None
+    max_age_seconds = RECENT_IMAGE_MAX_AGE_SECONDS if max_age_seconds is None else float(max_age_seconds)
+
+    now = time.time()
+    image_urls = []
+
+    def fresh(item):
+        ts_epoch = item.get("ts_epoch")
+        if ts_epoch is None:
+            return True
+        try:
+            return now - float(ts_epoch) <= max_age_seconds
+        except Exception:
+            return True
+
+    # 第一优先级：专门的群图片缓存
+    items = [item for item in list(group_image_cache.get(group_id, [])) if fresh(item)]
+
+    # 1.1 优先同一用户最近发的图
+    if user_id:
+        for item in reversed(items):
+            if str(item.get("user_id", "")) != user_id:
+                continue
+
+            url = (item.get("url") or "").strip()
+            if url and url not in image_urls:
+                image_urls.append(url)
+
+            if len(image_urls) >= max_images:
+                return list(reversed(image_urls))
+
+    # 1.2 再取本群最近图片
+    for item in reversed(items):
+        url = (item.get("url") or "").strip()
+        if url and url not in image_urls:
+            image_urls.append(url)
+
+        if len(image_urls) >= max_images:
+            return list(reversed(image_urls))
+
+    # 第二优先级：从普通群消息缓存兜底找 image_urls
+    msgs = list(group_message_cache.get(group_id, []))[-limit_msgs:]
+
+    if user_id:
+        for m in reversed(msgs):
+            if str(m.get("user_id", "")) != user_id:
+                continue
+
+            for url in reversed(list(m.get("image_urls") or [])):
+                url = (url or "").strip()
+                if url and url not in image_urls:
+                    image_urls.append(url)
+
+                if len(image_urls) >= max_images:
+                    return list(reversed(image_urls))
+
+    for m in reversed(msgs):
+        for url in reversed(list(m.get("image_urls") or [])):
+            url = (url or "").strip()
+            if url and url not in image_urls:
+                image_urls.append(url)
+
+            if len(image_urls) >= max_images:
+                return list(reversed(image_urls))
+
+    return list(reversed(image_urls))
+
 
 
 def record_bot_group_message(group_id, text):
@@ -454,6 +870,7 @@ def record_bot_group_message(group_id, text):
         "user_id": "BOT",
         "nickname": "弹性",
         "text": text,
+        "image_urls": [],
         "is_bot": True,
     })
 
@@ -461,6 +878,311 @@ def record_bot_group_message(group_id, text):
         f"[缓存机器人消息] group={group_id} seq={group_message_seq[group_id]} text={text}",
         flush=True
     )
+
+    save_periodic_state()
+
+
+
+async def image_url_to_openai_ref(url):
+    """
+    返回 OpenAI-compatible image_url.url。
+    IMAGE_SEND_MODE=url 时直接返回原 URL。
+    IMAGE_SEND_MODE=data_url 时，先下载图片再转成 base64 data URL。
+    """
+    url = (url or "").strip()
+
+    if not url:
+        return ""
+
+    if url.startswith("data:image/"):
+        return url
+
+    if IMAGE_SEND_MODE != "data_url":
+        return url
+
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get(url)
+
+        if resp.status_code >= 400:
+            print(f"[图片下载失败] status={resp.status_code} url={url[:120]}", flush=True)
+            return url
+
+        content = resp.content
+
+        if len(content) > MAX_IMAGE_DOWNLOAD_BYTES:
+            print(f"[图片过大] size={len(content)} url={url[:120]}", flush=True)
+            return url
+
+        content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+
+        if not content_type.startswith("image/"):
+            content_type = "image/jpeg"
+
+        b64 = base64.b64encode(content).decode("ascii")
+        return f"data:{content_type};base64,{b64}"
+
+    except Exception as e:
+        print(f"[图片转data_url失败] {e} url={url[:120]}", flush=True)
+        return url
+
+
+async def build_user_content(text, image_urls=None):
+    image_urls = list(image_urls or [])
+    valid_urls = []
+
+    for url in image_urls[:MAX_IMAGES_PER_MESSAGE]:
+        ref = await image_url_to_openai_ref(url)
+        if ref:
+            valid_urls.append(ref)
+
+    if not valid_urls:
+        return text
+
+    first = valid_urls[0]
+    if first.startswith("data:image/"):
+        first_info = f"data_url len={len(first)} prefix={first[:40]}"
+    else:
+        first_info = f"url={first[:160]}"
+
+    print(
+        f"[视觉请求] mode={IMAGE_SEND_MODE} format={VISION_IMAGE_URL_FORMAT} "
+        f"images={len(valid_urls)} first={first_info}",
+        flush=True
+    )
+
+    content = [
+        {
+            "type": "text",
+            "text": text or "请结合图片内容回复。"
+        }
+    ]
+
+    for ref in valid_urls:
+        if VISION_IMAGE_URL_FORMAT == "simple":
+            content.append({
+                "type": "image_url",
+                "image_url": ref
+            })
+        else:
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": ref
+                }
+            })
+
+    return content
+
+
+def image_reference_intent(text):
+    """
+    判断用户这句话是不是在问图片/截图/影像。
+    不再只靠单个“图”字，避免“现在可以读图了”这种陈述句误触发。
+    """
+    t = (text or "").strip()
+
+    if not t:
+        return False
+
+    patterns = [
+        r"这.*图",
+        r"这个.*图",
+        r"这张.*图",
+        r"上.*图",
+        r"刚.*图",
+        r"图.*什么",
+        r"图片.*什么",
+        r"截图.*什么",
+        r"影像.*为何",
+        r"此影像",
+        r"观见.*影像",
+        r"描述.*图",
+        r"描述.*影像",
+        r"看.*图",
+        r"看看.*图",
+        r"看下.*图",
+        r"看一下.*图",
+        r"看.*这个",
+        r"看.*这是",
+        r"这是.*干嘛",
+        r"这是.*什么",
+        r"这里面.*什么",
+        r"里面.*什么",
+        r"识别.*图",
+        r"读.*图",
+        r"认.*图",
+        r"画面.*什么",
+        r"画面.*内容",
+    ]
+
+    for pat in patterns:
+        if re.search(pat, t):
+            return True
+
+    # 一些短句直接认为是在问图
+    exact_like = [
+        "看图", "读图", "识图", "这图", "上图",
+        "这是什么图", "这图是什么", "图里有什么",
+        "这张图里有什么", "这是在干嘛", "这是什么",
+    ]
+
+    return any(k in t for k in exact_like)
+
+
+
+def remember_private_images(user_id, image_urls):
+    user_id = str(user_id)
+    image_urls = list(image_urls or [])
+
+    if not user_id or not image_urls:
+        return
+
+    ts = time.strftime("%H:%M:%S", time.localtime())
+
+    for url in image_urls:
+        url = (url or "").strip()
+        if not url:
+            continue
+
+        private_image_cache[user_id].append({
+            "time": ts,
+            "url": url,
+        })
+
+    print(
+        f"[私聊图片缓存] user={user_id} images={len(image_urls)}",
+        flush=True
+    )
+
+
+def get_recent_private_image_urls(user_id, max_images=1):
+    user_id = str(user_id)
+    items = list(private_image_cache.get(user_id, []))
+
+    image_urls = []
+
+    for item in reversed(items):
+        url = (item.get("url") or "").strip()
+        if url and url not in image_urls:
+            image_urls.append(url)
+
+        if len(image_urls) >= max_images:
+            break
+
+    return list(reversed(image_urls))
+
+
+
+
+def remember_group_images(group_id, user_id, image_urls):
+    group_id = str(group_id)
+    user_id = str(user_id)
+    image_urls = list(image_urls or [])
+
+    if not group_id or not user_id or not image_urls:
+        return
+
+    ts = time.strftime("%H:%M:%S", time.localtime())
+    now = time.time()
+    n = 0
+
+    for url in image_urls:
+        url = (url or "").strip()
+        if not url:
+            continue
+
+        group_image_cache[group_id].append({
+            "time": ts,
+            "ts_epoch": now,
+            "user_id": user_id,
+            "url": url,
+        })
+        n += 1
+
+    print(
+        f"[群图片缓存] group={group_id} user={user_id} images={n}",
+        flush=True
+    )
+
+
+
+def get_recent_group_image_urls(group_id, user_id=None, limit_msgs=30, max_images=2, max_age_seconds=None):
+    """
+    获取某个群最近图片 URL。
+    优先级：
+    1. 同一用户最近图片；
+    2. 本群最近图片；
+    3. group_message_cache 兜底。
+    """
+    group_id = str(group_id)
+    user_id = str(user_id) if user_id is not None else None
+    max_age_seconds = RECENT_IMAGE_MAX_AGE_SECONDS if max_age_seconds is None else float(max_age_seconds)
+
+    now = time.time()
+    image_urls = []
+
+    def fresh(item):
+        ts_epoch = item.get("ts_epoch")
+        if ts_epoch is None:
+            return True
+        try:
+            return now - float(ts_epoch) <= max_age_seconds
+        except Exception:
+            return True
+
+    # 第一优先级：专门的群图片缓存
+    items = [item for item in list(group_image_cache.get(group_id, [])) if fresh(item)]
+
+    # 1.1 优先同一用户最近发的图
+    if user_id:
+        for item in reversed(items):
+            if str(item.get("user_id", "")) != user_id:
+                continue
+
+            url = (item.get("url") or "").strip()
+            if url and url not in image_urls:
+                image_urls.append(url)
+
+            if len(image_urls) >= max_images:
+                return list(reversed(image_urls))
+
+    # 1.2 再取本群最近图片
+    for item in reversed(items):
+        url = (item.get("url") or "").strip()
+        if url and url not in image_urls:
+            image_urls.append(url)
+
+        if len(image_urls) >= max_images:
+            return list(reversed(image_urls))
+
+    # 第二优先级：从普通群消息缓存兜底找 image_urls
+    msgs = list(group_message_cache.get(group_id, []))[-limit_msgs:]
+
+    if user_id:
+        for m in reversed(msgs):
+            if str(m.get("user_id", "")) != user_id:
+                continue
+
+            for url in reversed(list(m.get("image_urls") or [])):
+                url = (url or "").strip()
+                if url and url not in image_urls:
+                    image_urls.append(url)
+
+                if len(image_urls) >= max_images:
+                    return list(reversed(image_urls))
+
+    for m in reversed(msgs):
+        for url in reversed(list(m.get("image_urls") or [])):
+            url = (url or "").strip()
+            if url and url not in image_urls:
+                image_urls.append(url)
+
+            if len(image_urls) >= max_images:
+                return list(reversed(image_urls))
+
+    return list(reversed(image_urls))
+
 
 
 def make_periodic_reply_fingerprint(text):
@@ -549,8 +1271,56 @@ async def call_openclaw(messages, max_tokens=800, timeout=300):
     return answer or "吾一时失语，未得佳答。"
 
 
-async def ask_openclaw(user_key, text, group_id=None):
+async def call_mimo_vision(messages, max_tokens=800, timeout=300):
+    if not MIMO_VISION_BASE_URL:
+        raise RuntimeError("MIMO_VISION_BASE_URL 未设置，无法直连 MiMo 视觉模型")
+
+    if not MIMO_VISION_API_KEY:
+        raise RuntimeError("MIMO_VISION_API_KEY 未设置，无法直连 MiMo 视觉模型")
+
+    url = MIMO_VISION_BASE_URL.rstrip("/") + "/chat/completions"
+
+    payload = {
+        "model": MIMO_VISION_MODEL,
+        "messages": messages,
+        "stream": False,
+        "max_tokens": max_tokens,
+    }
+
+    print(
+        f"[直连MiMo视觉] url={url} model={MIMO_VISION_MODEL}",
+        flush=True
+    )
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            url,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {MIMO_VISION_API_KEY}",
+            },
+            json=payload,
+        )
+
+    if resp.status_code >= 400:
+        raise RuntimeError(f"MiMo Vision HTTP {resp.status_code}: {resp.text[:800]}")
+
+    data = resp.json()
+
+    answer = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+        .strip()
+    )
+
+    return answer or "吾一时失语，未得佳答。"
+
+
+
+async def ask_openclaw(user_key, text, group_id=None, image_urls=None):
     history = histories[user_key]
+    image_urls = list(image_urls or [])
 
     messages = [
         {
@@ -559,8 +1329,21 @@ async def ask_openclaw(user_key, text, group_id=None):
         }
     ]
 
-    # 主动 @ / 关键词触发时，额外带上当前群最近聊天缓存
+    # 主动 @ / 关键词触发时，额外带上群长期压缩记忆 + 当前群最近聊天缓存
     if group_id is not None:
+        memory_context = build_group_memory_context(group_id)
+
+        if memory_context.strip():
+            messages.append({
+                "role": "system",
+                "content": (
+                    "下面是当前QQ群的长期压缩记忆。"
+                    "它不是完整聊天记录，而是较长时间范围内沉淀下来的背景信息。"
+                    "你回答时可以参考它，但不要逐字复述。\n\n"
+                    + memory_context
+                )
+            })
+
         try:
             group_context = build_group_context_text(
                 group_id,
@@ -574,32 +1357,51 @@ async def ask_openclaw(user_key, text, group_id=None):
                 "role": "system",
                 "content": (
                     "下面是当前QQ群最近聊天缓存，包含群友消息，也可能包含你自己之前说过的话。"
+                    "其中“图片数=N”表示该消息里带过图片。"
                     "你回答当前用户时要参考这些上下文，避免重复自己刚刚说过的话，"
                     "也不要把缓存逐字复述出来。\n\n"
                     + group_context
                 )
             })
 
+        # 如果当前消息没有图片，但用户明显在问“上图/这图/图片”，就补最近图片给模型
+        if not image_urls and image_reference_intent(text):
+            image_urls = get_recent_group_image_urls(
+                group_id,
+                limit_msgs=30,
+                max_images=MAX_CONTEXT_IMAGES
+            )
+
     for role, content in history:
         messages.append({"role": role, "content": content})
 
+    user_text = (
+        "请严格按照“弹性 / 张智豪”的人物设定回答。"
+        "不要提 BOOTSTRAP、IDENTITY、USER、SOUL、OpenClaw、模型、工作区初始化。"
+        "请结合当前群聊上下文回答下面这句话。"
+        "如果本轮消息附带图片，请务必阅读图片内容再回答，不要只说“我看不到图片”。"
+        "用户消息："
+        + text
+    )
+
+    user_content = await build_user_content(user_text, image_urls=image_urls)
+
     messages.append({
         "role": "user",
-        "content": (
-            "请严格按照“弹性 / 张智豪”的人物设定回答。"
-            "不要提 BOOTSTRAP、IDENTITY、USER、SOUL、OpenClaw、模型、工作区初始化。"
-            "请结合当前群聊上下文回答下面这句话。"
-            "用户消息："
-            + text
-        )
+        "content": user_content
     })
 
-    answer = await call_openclaw(messages, max_tokens=800, timeout=300)
+    if image_urls and USE_DIRECT_MIMO_VISION:
+        answer = await call_mimo_vision(messages, max_tokens=800, timeout=300)
+    else:
+        answer = await call_openclaw(messages, max_tokens=800, timeout=300)
 
     history.append(("user", text))
     history.append(("assistant", answer))
 
     return answer
+
+
 
 
 async def send_group_msg(ws, group_id, user_id, text, mention=True):
@@ -816,7 +1618,7 @@ async def periodic_group_review(ws):
 
             for group_id in group_ids:
                 try:
-                    recent_text, max_seq, total_new_count, human_new_count = build_group_recent_text(
+                    recent_text, max_seq, total_new_count, human_new_count, periodic_image_urls = build_group_recent_text(
                         group_id,
                         limit=80,
                         only_new=True
@@ -847,10 +1649,12 @@ async def periodic_group_review(ws):
                         )
                         continue
 
-                    prompt = f"""
-下面是某QQ群自上次巡群后新增的消息片段。
+                    group_memory_context = build_group_memory_context(group_id)
 
-你只能基于这些新增消息判断是否值得作为“弹性 / 张智豪”主动接一句。
+                    prompt = f"""
+下面是某QQ群的长期压缩记忆，以及自上次巡群后新增的消息片段。
+
+你要基于“长期压缩记忆 + 新增消息”判断是否值得作为“弹性 / 张智豪”主动接一句。
 
 规则：
 1. 如果不值得插话，严格只输出 SILENCE。
@@ -861,18 +1665,29 @@ async def periodic_group_review(ws):
 6. 不要长篇总结，不要像公告。
 7. 保持半文言、茶学书生、QQ群友风格。
 
+长期压缩记忆：
+{group_memory_context if group_memory_context else "暂无"}
+
 新增消息如下：
 
 {recent_text}
 """
 
+                    periodic_user_content = await build_user_content(
+                        prompt,
+                        image_urls=periodic_image_urls[:MAX_IMAGES_PER_MESSAGE]
+                    )
+
                     messages = [
                         {"role": "system", "content": get_periodic_system_prompt()},
-                        {"role": "user", "content": prompt},
+                        {"role": "user", "content": periodic_user_content},
                     ]
 
                     try:
-                        answer = await call_openclaw(messages, max_tokens=300, timeout=300)
+                        if periodic_image_urls and USE_DIRECT_MIMO_VISION:
+                            answer = await call_mimo_vision(messages, max_tokens=300, timeout=300)
+                        else:
+                            answer = await call_openclaw(messages, max_tokens=300, timeout=300)
                     except Exception as e:
                         print(f"[定时巡群失败] group={group_id} error={e}", flush=True)
                         mark_group_periodic_done(group_id, max_seq)
@@ -935,13 +1750,13 @@ async def handle_group_message(ws, event):
         return
 
     group_id = str(event.get("group_id", ""))
-    at_me, text = parse_message(event)
+    at_me, text, image_urls = parse_message(event)
 
     if not text:
         text = "你好"
 
     # 先记录所有群消息，供每3小时巡群使用
-    record_group_message(event, text)
+    record_group_message(event, text, image_urls=image_urls)
 
     if not should_reply(at_me, text):
         return
@@ -988,7 +1803,41 @@ async def handle_group_message(ws, event):
     print(f"[收到{trigger}] group={group_id} user={user_id} text={text}", flush=True)
 
     try:
-        answer = await ask_openclaw(user_key, text, group_id=group_id)
+        if not image_urls and image_reference_intent(text):
+            image_urls = get_recent_group_image_urls(
+                group_id,
+                user_id=user_id,
+                max_images=MAX_CONTEXT_IMAGES,
+                max_age_seconds=RECENT_IMAGE_MAX_AGE_SECONDS
+            )
+
+            # QQ/NapCat 有时会先上报文字、后上报图片；没找到图就稍等再找一次
+            if not image_urls and IMAGE_WAIT_AFTER_TEXT_SECONDS > 0:
+                print(
+                    f"[群聊等图] group={group_id} user={user_id} text={text} wait={IMAGE_WAIT_AFTER_TEXT_SECONDS}s",
+                    flush=True
+                )
+                await asyncio.sleep(IMAGE_WAIT_AFTER_TEXT_SECONDS)
+
+                image_urls = get_recent_group_image_urls(
+                    group_id,
+                    user_id=user_id,
+                    max_images=MAX_CONTEXT_IMAGES,
+                    max_age_seconds=RECENT_IMAGE_MAX_AGE_SECONDS
+                )
+
+            if image_urls:
+                print(
+                    f"[群聊补图] group={group_id} user={user_id} text={text} images={len(image_urls)}",
+                    flush=True
+                )
+            else:
+                print(
+                    f"[群聊无图可补] group={group_id} user={user_id} text={text}",
+                    flush=True
+                )
+
+        answer = await ask_openclaw(user_key, text, group_id=group_id, image_urls=image_urls)
     except Exception as e:
         answer = f"吾调用 OpenClaw 失利：{e}"
 
@@ -1004,16 +1853,37 @@ async def handle_private_message(ws, event):
     if user_id == self_id:
         return
 
-    text = event.get("raw_message", "").strip()
+    _at_me, text, image_urls = parse_message(event)
+
+    if not text:
+        text = event.get("raw_message", "").strip()
+
     if not text:
         text = "你好"
 
+    # 当前私聊消息带图：先缓存图片
+    if image_urls:
+        remember_private_images(user_id, image_urls)
+
+    # 当前消息没图，但用户在问“看图/这图/上图”：自动取最近私聊图片
+    if not image_urls and image_reference_intent(text):
+        image_urls = get_recent_private_image_urls(
+            user_id,
+            max_images=MAX_CONTEXT_IMAGES
+        )
+
+        if image_urls:
+            print(
+                f"[私聊补图] user={user_id} text={text} images={len(image_urls)}",
+                flush=True
+            )
+
     user_key = f"private-user-{user_id}"
 
-    print(f"[收到私聊] user={user_id} text={text}", flush=True)
+    print(f"[收到私聊] user={user_id} text={text} images={len(image_urls)}", flush=True)
 
     try:
-        answer = await ask_openclaw(user_key, text)
+        answer = await ask_openclaw(user_key, text, image_urls=image_urls)
     except Exception as e:
         answer = f"吾调用 OpenClaw 失利：{e}"
 
@@ -1042,6 +1912,7 @@ async def main():
 
     while True:
         periodic_task = None
+        memory_task = None
 
         try:
             print(f"连接 NapCat OneBot: {ONEBOT_WS}", flush=True)
@@ -1054,6 +1925,7 @@ async def main():
                 print("已连接 NapCat OneBot", flush=True)
 
                 periodic_task = asyncio.create_task(periodic_group_review(ws))
+                memory_task = asyncio.create_task(periodic_group_memory_compaction())
 
                 async for raw in ws:
                     try:
@@ -1073,6 +1945,8 @@ async def main():
         finally:
             if periodic_task:
                 periodic_task.cancel()
+            if memory_task:
+                memory_task.cancel()
 
 
 if __name__ == "__main__":

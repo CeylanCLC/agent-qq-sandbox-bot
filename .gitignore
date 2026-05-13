@@ -36,3 +36,21 @@ share/*
 docker-compose.yml.bak.*
 127.0.0.1:*
 =
+
+# Memory / runtime states
+group_memory_state.json
+periodic_state.json
+
+# Backups
+*.bak
+*.bak.*
+qq_openclaw_bridge.py.bak*
+
+# Memory / runtime states
+group_memory_state.json
+periodic_state.json
+
+# Backups
+*.bak
+*.bak.*
+qq_openclaw_bridge.py.bak*
