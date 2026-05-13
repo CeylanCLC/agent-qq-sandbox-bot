@@ -1418,6 +1418,89 @@ journalctl -u qq-openclaw-bridge -n 300 --no-pager --full \
 
 ---
 
+---
+
+## 24. MiMo 视觉读图故障排查补充
+
+### 24.1 偶发 ASCII 编码错误
+
+如果日志中出现类似：
+
+    吾调用模型失利：'ascii' codec can't encode characters in position ...
+
+或者：
+
+    MIMO_VISION_API_KEY 含非 ASCII 字符
+
+通常不是 NapCat 没收到图片，也不是图片缓存失败，而是 MiMo 视觉直连接口的请求中存在非 ASCII 字符，常见来源包括：
+
+1. systemd 环境变量里存在多个 MIMO_VISION_API_KEY 来源
+2. 某个旧配置文件中残留了中文占位符
+3. API Key 前后混入隐藏字符
+4. 请求体中包含中文、emoji、特殊昵称，被某些 OpenAI-compatible 网关按 ASCII 编码处理
+
+当前项目已将 MiMo Vision 请求改为 ASCII-safe JSON：
+
+    json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+这样中文、emoji、特殊昵称会被转义为 Unicode 形式，能减少编码类错误。
+
+### 24.2 检查运行中的 MiMo Key
+
+不要直接打印 API Key。推荐只检查长度和编码：
+
+    PID=$(systemctl show -p MainPID --value qq-openclaw-bridge)
+
+    PID="$PID" python3 - <<'PY'
+    import os
+    from pathlib import Path
+
+    pid = os.environ["PID"]
+    items = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+
+    vals = [
+        x.split(b"=", 1)[1]
+        for x in items
+        if x.startswith(b"MIMO_VISION_API_KEY=")
+    ]
+
+    print("MIMO_VISION_API_KEY count:", len(vals))
+
+    for i, v in enumerate(vals):
+        try:
+            v.decode("ascii")
+            ascii_ok = True
+        except UnicodeDecodeError:
+            ascii_ok = False
+
+        print(f"#{i}: len={len(v)} ascii={ascii_ok}")
+    PY
+
+理想结果：
+
+    MIMO_VISION_API_KEY count: 1
+    #0: len=正常长度 ascii=True
+
+如果 count 大于 1，说明有多个配置来源；如果 ascii=False，说明 key 中有非 ASCII 脏字符。
+
+### 24.3 推荐的 MiMo Key 管理方式
+
+建议把 MiMo API Key 单独放到本地文件：
+
+    /root/openclaw-qq/mimo-secret.env
+
+文件内容：
+
+    MIMO_VISION_API_KEY=your_real_api_key
+
+systemd 中使用：
+
+    [Service]
+    EnvironmentFile=/root/openclaw-qq/mimo-secret.env
+
+不要把 mimo-secret.env、model.env 或任何 .env 文件提交到 GitHub。
+
+
 ## 24. 安全注意事项
 
 不要提交以下内容到 GitHub：

@@ -54,3 +54,6 @@ periodic_state.json
 *.bak
 *.bak.*
 qq_openclaw_bridge.py.bak*
+mimo-secret.env
+model.env
+*.env

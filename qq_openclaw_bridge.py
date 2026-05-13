@@ -1287,20 +1287,52 @@ async def call_mimo_vision(messages, max_tokens=800, timeout=300):
         "max_tokens": max_tokens,
     }
 
+    # 关键修复：
+    # 不再使用 httpx 的 json=payload，而是手动 ensure_ascii=True。
+    # 这样中文、emoji、特殊昵称都会变成 \uXXXX，避免某些 OpenAI-compatible 网关按 ASCII 编码时报错。
+    body = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":")
+    ).encode("utf-8")
+
+    api_key = MIMO_VISION_API_KEY.strip()
+    base_url = MIMO_VISION_BASE_URL.strip()
+    model = MIMO_VISION_MODEL.strip()
+
+    # Header 必须是 ASCII。这里不打印 key，只做严格检查。
+    for name, value in {
+        "MIMO_VISION_BASE_URL": base_url,
+        "MIMO_VISION_API_KEY": api_key,
+        "MIMO_VISION_MODEL": model,
+    }.items():
+        try:
+            value.encode("ascii")
+        except UnicodeEncodeError as e:
+            raise RuntimeError(f"{name} 含非 ASCII 字符，请检查 systemd 环境变量") from e
+
     print(
-        f"[直连MiMo视觉] url={url} model={MIMO_VISION_MODEL}",
+        f"[直连MiMo视觉] url={url} model={model} body_len={len(body)} ascii_safe=1",
         flush=True
     )
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            url,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {MIMO_VISION_API_KEY}",
-            },
-            json=payload,
-        )
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                url,
+                headers=headers,
+                content=body,
+            )
+    except UnicodeEncodeError as e:
+        raise RuntimeError(
+            "MiMo Vision 本地编码失败：请求里仍有某个字段被当作 ASCII 编码。"
+            f" detail={e}"
+        ) from e
 
     if resp.status_code >= 400:
         raise RuntimeError(f"MiMo Vision HTTP {resp.status_code}: {resp.text[:800]}")
@@ -1315,7 +1347,6 @@ async def call_mimo_vision(messages, max_tokens=800, timeout=300):
     )
 
     return answer or "吾一时失语，未得佳答。"
-
 
 
 async def ask_openclaw(user_key, text, group_id=None, image_urls=None):
@@ -1839,7 +1870,7 @@ async def handle_group_message(ws, event):
 
         answer = await ask_openclaw(user_key, text, group_id=group_id, image_urls=image_urls)
     except Exception as e:
-        answer = f"吾调用 OpenClaw 失利：{e}"
+        answer = f"吾调用模型失利：{e}"
 
     print(f"[回复] {answer}", flush=True)
 
@@ -1885,7 +1916,7 @@ async def handle_private_message(ws, event):
     try:
         answer = await ask_openclaw(user_key, text, image_urls=image_urls)
     except Exception as e:
-        answer = f"吾调用 OpenClaw 失利：{e}"
+        answer = f"吾调用模型失利：{e}"
 
     print(f"[私聊回复] {answer}", flush=True)
 
