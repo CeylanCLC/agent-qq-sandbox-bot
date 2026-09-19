@@ -1,0 +1,17 @@
+/* Existing console refinement. All routes share the same shell. */
+:root{--bg:#090f1b;--panel:#101a29;--line:#26364b;--muted:#9cabc0}
+.brand-sub{letter-spacing:1.5px;font-size:9px;white-space:nowrap}
+.main{padding-left:30px;padding-right:30px}.topbar{height:66px}
+.page-heading{margin:24px 0 20px}.stats{gap:14px}.stat{padding:16px 18px}
+.stat strong{margin:6px 0 2px}.panel-head{padding:16px 20px}
+.grid{align-items:start}.panel{box-shadow:0 4px 20px #0000000a}
+.quick-strip{display:flex;align-items:center;gap:20px;margin:-4px 0 20px;padding:11px 16px;border:1px solid var(--line);border-radius:8px;font-size:12px;background:#0d1828}
+.quick-strip span{color:var(--muted);margin-right:auto}.quick-strip a{color:#89dded}
+.clip-grid{display:grid;grid-template-columns:minmax(250px,.85fr) minmax(0,1.65fr);gap:20px;align-items:start}
+.clip-list{max-height:620px;overflow:auto;padding:0 12px 12px}
+.clip-entry{display:block;width:100%;text-align:left;border:1px solid transparent;border-radius:9px;padding:14px;background:none;color:var(--text);margin-bottom:5px;cursor:pointer}
+.clip-entry:hover,.clip-entry.selected{border-color:#36546b;background:#17293b}.clip-entry strong{font-size:13px;display:block;font-weight:550;overflow-wrap:anywhere}.clip-entry p{font-size:12px;color:var(--muted);margin:6px 0;white-space:pre-wrap;overflow:hidden;max-height:40px;overflow-wrap:anywhere}.clip-entry small{color:#8b9cb3;font-size:10px}
+.clip-form{padding:0 20px 20px}.clip-form label{display:block;font-size:12px;color:var(--muted);margin:15px 0 6px}
+.clip-form input,.clip-form textarea,.clip-form select{width:100%;background:#0b1422;border:1px solid #304359;border-radius:8px;color:var(--text);padding:11px 13px;font:inherit;outline:none}.clip-form input:focus,.clip-form textarea:focus{border-color:#75d5e8}.clip-form textarea{min-height:300px;resize:vertical;line-height:1.75;font-family:ui-monospace,Consolas,"Microsoft YaHei",monospace;font-size:13px}.clip-form select{width:auto;min-width:140px}.clip-meta{display:flex;justify-content:space-between;gap:12px;align-items:center;font-size:11px;color:var(--muted);margin:8px 0 18px}.clip-buttons{display:flex;gap:9px;flex-wrap:wrap;margin-top:16px}.clip-buttons button{min-height:40px}.danger{color:#ffb8b8;border-color:#63404a}.clip-status{font-size:12px;color:#8fe2bd;min-height:24px;margin:14px 0 0}.clip-status.failure{color:#ffd092}.clip-helper{padding:15px 20px;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}.clip-sync{font-size:11px;color:#98c7d5}.clip-empty{padding:35px 14px;text-align:center;color:var(--muted);font-size:12px}.clip-conflict{color:#ffd092;font-size:12px;line-height:1.7;padding:12px;border:1px solid #685535;border-radius:8px;margin:10px 0}.clip-conflict button{margin-top:8px}
+@media(max-width:1000px){.clip-grid{grid-template-columns:1fr}.clip-list{max-height:260px}.clip-form textarea{min-height:260px}}
+@media(max-width:650px){.main{padding:0 14px 22px}.sidebar nav{overflow-x:auto;white-space:nowrap;gap:3px}.nav-item{padding:9px}.quick-strip{gap:12px;flex-wrap:wrap}.quick-strip span{width:100%}.clip-grid{gap:16px}.clip-form{padding:0 15px 16px}.clip-form input,.clip-form textarea,.clip-form select{font-size:16px}.clip-buttons .primary{flex:1}.clip-buttons button{min-height:44px}.stats{gap:10px}.stat{padding:14px}.topbar{height:52px}}

@@ -1,2 +1,3 @@
 httpx
 websockets
+cryptography
