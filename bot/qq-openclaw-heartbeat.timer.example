@@ -1,0 +1,11 @@
+[Unit]
+Description=Send QQ OpenClaw heartbeat every minute
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

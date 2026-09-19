@@ -1,0 +1,14 @@
+[Unit]
+Description=QQ OpenClaw control-plane heartbeat
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/qq-openclaw-bot
+EnvironmentFile=/etc/qq-openclaw-bot.env
+ExecStart=/opt/qq-openclaw-bot/venv/bin/python /opt/qq-openclaw-bot/heartbeat.py
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+

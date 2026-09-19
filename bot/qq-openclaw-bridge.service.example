@@ -1,0 +1,18 @@
+[Unit]
+Description=QQ OpenClaw Bridge
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/qq-openclaw-bot
+EnvironmentFile=/etc/qq-openclaw-bot.env
+ExecStart=/opt/qq-openclaw-bot/venv/bin/python /opt/qq-openclaw-bot/qq_openclaw_bridge.py
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

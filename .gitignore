@@ -1,59 +1,25 @@
-# Python
-venv/
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.log
-bridge.log
-
-# Secrets / env
-.env
-.env.*
-*.token
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.env
+!.env.example
 *.key
-
-# Runtime cache
+*.pem
+*.crt
+*.db
+*.sqlite*
+*.log
+runtime-status.json
+observer-status.json
 periodic_state.json
-
-# NapCat / QQ login state / sensitive runtime files
+group_memory_state.json
+model.env
+control-v4/
+keys-v5/
+fun-v6/
 napcat/
 ntqq/
-docker-compose.yml
-
-# Shared files sent to QQ groups
 share/*
 !share/.gitkeep
-
-# Editor / OS
-.DS_Store
-.vscode/
-.idea/
-
-# Backups / accidental files
-*.bak
-*.bak.*
-docker-compose.yml.bak.*
-127.0.0.1:*
-=
-
-# Memory / runtime states
-group_memory_state.json
-periodic_state.json
-
-# Backups
-*.bak
-*.bak.*
-qq_openclaw_bridge.py.bak*
-
-# Memory / runtime states
-group_memory_state.json
-periodic_state.json
-
-# Backups
-*.bak
-*.bak.*
-qq_openclaw_bridge.py.bak*
-mimo-secret.env
-model.env
-*.env
