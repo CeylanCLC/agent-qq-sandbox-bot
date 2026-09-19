@@ -1,3 +1,6 @@
+# 可以访问我的网站ceylanclc.icu查看最新动态
+
+
 # QQ OpenClaw Bot + 可选 Web 控制台
 
 一个把 QQ、NapCat OneBot 11、OpenClaw 与 OpenAI-compatible 模型连接起来的 Python 项目。它既可以只运行机器人核心，也可以接入现有 Flask 管理后台，在网页里查看状态、管理记忆与回复策略、切换模型密钥，并使用跨设备粘贴板。
@@ -121,3 +124,15 @@ python3 -m unittest discover -s tests -v
 ## 免责声明
 
 请遵守 QQ、NapCat、模型服务商和所在地区的服务条款与法律。不要把密钥、登录态、数据库、聊天记录或真实群号提交到公开仓库。
+
+## 网站后台功能预览图片
+<img width="2481" height="1265" alt="image" src="https://github.com/user-attachments/assets/9062d75c-ab8b-4634-95e7-410b114bde63" />
+<img width="2485" height="1266" alt="image" src="https://github.com/user-attachments/assets/67c7289d-a1af-4fbe-a03d-e9ac11a94a86" />
+<img width="2478" height="1254" alt="image" src="https://github.com/user-attachments/assets/bb7d3cdc-87ec-4c10-9d94-72b39ce38084" />
+<img width="2496" height="1263" alt="image" src="https://github.com/user-attachments/assets/370af369-3ced-4b3e-882a-5457d2eacdc1" />
+<img width="2496" height="1267" alt="image" src="https://github.com/user-attachments/assets/827a8a59-a26b-4b4e-a0a0-05f33d520687" />
+<img width="2496" height="1262" alt="image" src="https://github.com/user-attachments/assets/af5281a8-b948-4db6-99ae-6efde82fdb08" />
+<img width="2473" height="1257" alt="image" src="https://github.com/user-attachments/assets/a86c7658-2ac5-4dd3-b9b9-8a5618d36878" />
+
+
+
